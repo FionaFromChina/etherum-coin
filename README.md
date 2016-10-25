@@ -277,6 +277,160 @@ function mintToken(address target, uint256 mintedAmount) onlyOwner {
     Transfer(owner, target, mintedAmount);
 }
 ```
+注意在方法声明的最后的`onlyOwner`,代表这个方法在编译的时候会继承我们之前定义的**modifier onlyOwner**。这个方法的代码将会被插入到*modifier*方法的下划线声明处,意味着这个方法只有合约的拥有者可以调用。使用这样的方法你就可以创建更多可流通的代币。
 
-Notice the modifier onlyOwner on the end of the function name. This means that this function will be rewritten at compilation to inherit the code from the modifier onlyOwner we had defined before. This function's code will be inserted where there's an underline on the modifier function, meaning that this particular function can only be called by the account that is set as the owner. Just add this to a contract with an owner modifier and you'll be able to create more coins.
-注意在
+### 冻结资产
+基于你的应用场景,你可能需要监管功能以便你能控制谁可以/谁不可以使用你创建的代币合约。为了实现这样的功能,你可以添加一个参数,使得合约拥有者可以冻结/解冻资产。
+
+在合约的任意地方添加以下的代码。你可以把他们放到任意地方,但是我们建议将mapping跟其他mapping放在一起,event跟其他event放在一起。
+```
+mapping (address => bool) public frozenAccount;
+event FrozenFunds(address target, bool frozen);
+
+function freezeAccount(address target, bool freeze) onlyOwner {
+    frozenAccount[target] = freeze;
+    FrozenFunds(target, freeze);
+}
+```
+在最开始,所有的账号都是解冻的,但是合约拥有者可以任意冻结账号。但是现在,冻结资产没有任何用处,因为我们还没有将资产冻结检查加入转账方法:
+```
+function transfer(address _to, uint256 _value) {
+    if (frozenAccount[msg.sender]) throw;
+```
+现在,任意被冻结的账号仍然拥有他们的资产,但是将不能转移他们。所有的账号默认都是解冻的除非主动冻结他们,但是你可以很容易的翻转整个操作,大家可以想象一下怎么做。
+
+### 自动交易
+目前为止,你的代币很实用,你也很相信他的价值。但是如果你想让**ether**(或其他代币)为你的代币进行背书,以便可以市场价自动化买卖代币,我们可以这么做。
+
+首先,让我们设置买卖价格:
+```
+uint256 public sellPrice;
+uint256 public buyPrice;
+
+function setPrices(uint256 newSellPrice, uint256 newBuyPrice) onlyOwner {
+    sellPrice = newSellPrice;
+    buyPrice = newBuyPrice;
+}
+```
+因为每一次价格的变动都会执行一个transaction并消耗一定的ether,只有价格不会经常变化的时候这个方法才是可以接受的。如果你想要一个持续浮动的价格,我们推荐你调查[标准数据源](https://github.com/ethereum/wiki/wiki/Standardized_Contract_APIs#data-feeds)
+
+接下来是构造买卖方法:
+```
+function buy() returns (uint amount){
+    amount = msg.value / buyPrice;                     // calculates the amount
+    if (balanceOf[this] < amount) throw;               // checks if it has enough to sell
+    balanceOf[msg.sender] += amount;                   // adds the amount to buyer's balance
+    balanceOf[this] -= amount;                         // subtracts amount from seller's balance
+    Transfer(this, msg.sender, amount);                // execute an event reflecting the change
+    return amount;                                     // ends function and returns
+}
+
+function sell(uint amount) returns (uint revenue){
+    if (balanceOf[msg.sender] < amount ) throw;        // checks if the sender has enough to sell
+    balanceOf[this] += amount;                         // adds the amount to owner's balance
+    balanceOf[msg.sender] -= amount;                   // subtracts the amount from seller's balance
+    revenue = amount * sellPrice;
+    if (!msg.sender.send(revenue)) {                   // sends ether to the seller: it's important
+        throw;                                         // to do this last to prevent recursion attacks
+    } else {
+        Transfer(msg.sender, this, amount);             // executes an event reflecting on the change
+        return revenue;                                 // ends function and returns
+    }
+}
+```
+注意,这不会创造新的代币只是改变合约拥有者的余额。这个合约可以保存自己代币和ether。合约的拥有者可以设置代币的价格或者在一定情况下创造新的代币。但是不能修改银行里的代币或ether。唯一能改变资产的就是通过买卖。
+
+**注意**买卖的价格单位不是ether,而是*wei*,这是系统中最小的单位(就像美元里的美分,比特币里的聪)。1 ether = 1000000000000000000 wei。因此使用ether设置价格的时候,在最后加18个0。
+
+当创建合约的时候,**发送足够多的ether作为代币的背书**,否则你的合约就是破产的,你的用户就不能够卖掉他们的代币。
+
+之前的那个例子,当然,只描述了一个买家一个卖家的情况。一个更真实更有趣的合约将会允许市场中的任何人出任何价格,或者可能直接从一个指定的数据源获取价格。
+
+
+### AUTOREFILL
+每次在以太坊平台中生成一个交易,你都需要给区块的矿工支付一定的费用,用于计算合约执行结果的报酬。[未来或许不需要了](https://github.com/ethereum/EIPs/issues/28),现在手续费只能使用ether支付,因此你的代币的所有用户都需要ether。如果账户里的余额不足以支付手续费,交易就会暂停。但是在一些使用场景中,你可能不想让你的用户想到以太坊,区块链或者是怎么去获取ether, 一个可能的方法就是只要检测到用户余额过低,就自动填充用户余额。
+
+为了做到这一点,首先你需要设置一个变量,标识余额下限,然后有一个方法改变他。如果你不知道值,设置成**0.5 finney**(0.005ether).
+```
+uint minBalanceForAccounts;
+
+function setMinBalance(uint minimumBalanceInFinney) onlyOwner {
+     minBalanceForAccounts = minimumBalanceInFinney * 1 finney;
+}
+```
+接着,添加如下代码到方法**transfer**:
+```
+/* Send coins */
+function transfer(address _to, uint256 _value) {
+    ...
+    if(msg.sender.balance<minBalanceForAccounts)
+        sell((minBalanceForAccounts-msg.sender.balance)/sellPrice);
+}
+```
+
+你也可以让接收方支付手续费:
+```
+/* Send coins */
+function transfer(address _to, uint256 _value) {
+    ...
+    if(_to.balance<minBalanceForAccounts)
+        _to.send(sell((minBalanceForAccounts-_to.balance)/sellPrice));
+}
+```
+
+### 工作量证明
+有几种方法可以让你的代币供应与数学公式对应起来。最简单的方法就是和ether*合并挖矿*,也就是说任何人只要在以太坊链上挖到了一个区块,也会获得你的合约的奖励。你可以使用[特殊关键字coinbase](https://solidity.readthedocs.io/en/latest/units-and-global-variables.html#block-and-transaction-properties)去指代找到该区块的矿工。
+```
+function giveBlockReward() {
+    balanceOf[block.coinbase] += 1;
+}
+```
+
+新增一个数学公式也是可能的,任何会数学计算的人都会赢得奖励。接下来的这个例子,你必须计算当前谜题的立方根并设置下一个谜题。
+```
+uint currentChallenge = 1; // Can you figure out the cubic root of this number?
+
+function rewardMathGeniuses(uint answerToCurrentReward, uint nextChallenge) {
+    if (answerToCurrentReward**3 != currentChallenge) throw; // If answer is wrong do not continue
+    balanceOf[msg.sender] += 1;         // Reward the player
+    currentChallenge = nextChallenge;   // Set the next challenge
+}
+```
+
+当然,对一些人来说,手算立方根是困难的,但是使用计算器却又非常简单。所以这个游戏很容易被计算机破解。而且因为最后一个胜利者可以选择下一个谜题,他们可以选择他们知道的值,所以对其他玩家来说不太公平。对一个公平的系统来说,计算机必须经过复杂的计算才能得到结果,但又不是非常难验证结果。一个好的候选方案是使用hash猜谜,猜谜者必须持续求值的hash,直到找到一个值,他的hash小于一个指定的困难度。
+
+这个过程由Adam Back在1997年首次在[Hashcash](https://en.wikipedia.org/wiki/Hashcash)提出,之后在2008年被中本聪引入比特币中,作为**工作量证明**.以太坊现在也使用的是这套算法,但是正计划从PoW迁移到[Casper](https://blog.ethereum.org/2015/12/28/understanding-serenity-part-2-casper/)
+
+但是,你也可以创建自己的PoW:
+```
+bytes32 public currentChallenge;                         // The coin starts with a challenge
+uint public timeOfLastProof;                             // Variable to keep track of when rewards were given
+uint public difficulty = 10**32;                         // Difficulty starts reasonably low
+
+function proofOfWork(uint nonce){
+    bytes8 n = bytes8(sha3(nonce, currentChallenge));    // Generate a random hash based on input
+    if (n < bytes8(difficulty)) throw;                   // Check if it's under the difficulty
+
+    uint timeSinceLastProof = (now - timeOfLastProof);  // Calculate time since last reward was given
+    if (timeSinceLastProof <  5 seconds) throw;         // Rewards cannot be given too quickly
+    balanceOf[msg.sender] += timeSinceLastProof / 60 seconds;  // The reward to the winner grows by the minute
+
+    difficulty = difficulty * 10 minutes / timeSinceLastProof + 1;  // Adjusts the difficulty
+
+    timeOfLastProof = now;                              // Reset the counter
+    currentChallenge = sha3(nonce, currentChallenge, block.blockhash(block.number-1));  // Save a hash that will be used as the next proof
+}
+```
+
+同样的,修改**构造方法**:
+```
+    timeOfLastProof = now;
+```
+
+一旦合约部署在线,选择方法*proofOfWork*, 添加你最喜欢的数字作为**随机数**,并执行。如果确认窗口给出一个红色警告并写着*Data can't be execute*,返回选择另外一个数字直到交易可以继续:这个过程是随机的。如果你找到了你就会得到一定的奖励, 并且会调整困难度。
+
+这个试图找到一个数值并获得奖励的过程就叫做*mining*:如果困难度增加,得到幸运数字会变得很困难,但是很容易去验证你找到的值是否正确。
+
+
+
+
