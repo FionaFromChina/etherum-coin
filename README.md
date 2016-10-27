@@ -431,6 +431,204 @@ function proofOfWork(uint nonce){
 
 这个试图找到一个数值并获得奖励的过程就叫做*mining*:如果困难度增加,得到幸运数字会变得很困难,但是很容易去验证你找到的值是否正确。
 
+## 完善后的合约
+
+### 完善合约代码
+如果你把所有的特性加上, 最后的合约代码如下:
+![](https://ethereum.org/images/tutorial/advanced-token-deploy.png)
+```
+pragma solidity ^0.4.2;
+contract owned {
+    address public owner;
+
+    function owned() {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner {
+        if (msg.sender != owner) throw;
+        _
+    }
+
+    function transferOwnership(address newOwner) onlyOwner {
+        owner = newOwner;
+    }
+}
+
+contract tokenRecipient { function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData); }
+
+contract token {
+    /* Public variables of the token */
+    string public standard = 'Token 0.1';
+    string public name;
+    string public symbol;
+    uint8 public decimals;
+    uint256 public totalSupply;
+
+    /* This creates an array with all balances */
+    mapping (address => uint256) public balanceOf;
+    mapping (address => mapping (address => uint256)) public allowance;
+
+    /* This generates a public event on the blockchain that will notify clients */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /* Initializes contract with initial supply tokens to the creator of the contract */
+    function token(
+        uint256 initialSupply,
+        string tokenName,
+        uint8 decimalUnits,
+        string tokenSymbol
+        ) {
+        balanceOf[msg.sender] = initialSupply;              // Give the creator all initial tokens
+        totalSupply = initialSupply;                        // Update total supply
+        name = tokenName;                                   // Set the name for display purposes
+        symbol = tokenSymbol;                               // Set the symbol for display purposes
+        decimals = decimalUnits;                            // Amount of decimals for display purposes
+        msg.sender.send(msg.value);                         // Send back any ether sent accidentally
+    }
+
+    /* Send coins */
+    function transfer(address _to, uint256 _value) {
+        if (balanceOf[msg.sender] < _value) throw;           // Check if the sender has enough
+        if (balanceOf[_to] + _value < balanceOf[_to]) throw; // Check for overflows
+        balanceOf[msg.sender] -= _value;                     // Subtract from the sender
+        balanceOf[_to] += _value;                            // Add the same to the recipient
+        Transfer(msg.sender, _to, _value);                   // Notify anyone listening that this transfer took place
+    }
+
+    /* Allow another contract to spend some tokens in your behalf */
+    function approve(address _spender, uint256 _value)
+        returns (bool success) {
+        allowance[msg.sender][_spender] = _value;
+        tokenRecipient spender = tokenRecipient(_spender);
+        return true;
+    }
+
+    /* Approve and then comunicate the approved contract in a single tx */
+    function approveAndCall(address _spender, uint256 _value, bytes _extraData)
+        returns (bool success) {
+        tokenRecipient spender = tokenRecipient(_spender);
+        if (approve(_spender, _value)) {
+            spender.receiveApproval(msg.sender, _value, this, _extraData);
+            return true;
+        }
+    }
+
+    /* A contract attempts to get the coins */
+    function transferFrom(address _from, address _to, uint256 _value) returns (bool success) {
+        if (balanceOf[_from] < _value) throw;                 // Check if the sender has enough
+        if (balanceOf[_to] + _value < balanceOf[_to]) throw;  // Check for overflows
+        if (_value > allowance[_from][msg.sender]) throw;   // Check allowance
+        balanceOf[_from] -= _value;                          // Subtract from the sender
+        balanceOf[_to] += _value;                            // Add the same to the recipient
+        allowance[_from][msg.sender] -= _value;
+        Transfer(_from, _to, _value);
+        return true;
+    }
+
+    /* This unnamed function is called whenever someone tries to send ether to it */
+    function () {
+        throw;     // Prevents accidental sending of ether
+    }
+}
+
+contract MyAdvancedToken is owned, token {
+
+    uint256 public sellPrice;
+    uint256 public buyPrice;
+    uint256 public totalSupply;
+
+    mapping (address => bool) public frozenAccount;
+
+    /* This generates a public event on the blockchain that will notify clients */
+    event FrozenFunds(address target, bool frozen);
+
+    /* Initializes contract with initial supply tokens to the creator of the contract */
+    function MyAdvancedToken(
+        uint256 initialSupply,
+        string tokenName,
+        uint8 decimalUnits,
+        string tokenSymbol,
+        address centralMinter
+    ) token (initialSupply, tokenName, decimalUnits, tokenSymbol) {
+        if(centralMinter != 0 ) owner = centralMinter;      // Sets the owner as specified (if centralMinter is not specified the owner is msg.sender)
+        balanceOf[owner] = initialSupply;                   // Give the owner all initial tokens
+    }
+
+    /* Send coins */
+    function transfer(address _to, uint256 _value) {
+        if (balanceOf[msg.sender] < _value) throw;           // Check if the sender has enough
+        if (balanceOf[_to] + _value < balanceOf[_to]) throw; // Check for overflows
+        if (frozenAccount[msg.sender]) throw;                // Check if frozen
+        balanceOf[msg.sender] -= _value;                     // Subtract from the sender
+        balanceOf[_to] += _value;                            // Add the same to the recipient
+        Transfer(msg.sender, _to, _value);                   // Notify anyone listening that this transfer took place
+    }
 
 
+    /* A contract attempts to get the coins */
+    function transferFrom(address _from, address _to, uint256 _value) returns (bool success) {
+        if (frozenAccount[_from]) throw;                        // Check if frozen
+        if (balanceOf[_from] < _value) throw;                 // Check if the sender has enough
+        if (balanceOf[_to] + _value < balanceOf[_to]) throw;  // Check for overflows
+        if (_value > allowance[_from][msg.sender]) throw;   // Check allowance
+        balanceOf[_from] -= _value;                          // Subtract from the sender
+        balanceOf[_to] += _value;                            // Add the same to the recipient
+        allowance[_from][msg.sender] -= _value;
+        Transfer(_from, _to, _value);
+        return true;
+    }
 
+    function mintToken(address target, uint256 mintedAmount) onlyOwner {
+        balanceOf[target] += mintedAmount;
+        totalSupply += mintedAmount;
+        Transfer(0, this, mintedAmount);
+        Transfer(this, target, mintedAmount);
+    }
+
+    function freezeAccount(address target, bool freeze) onlyOwner {
+        frozenAccount[target] = freeze;
+        FrozenFunds(target, freeze);
+    }
+
+    function setPrices(uint256 newSellPrice, uint256 newBuyPrice) onlyOwner {
+        sellPrice = newSellPrice;
+        buyPrice = newBuyPrice;
+    }
+
+    function buy() {
+        uint amount = msg.value / buyPrice;                // calculates the amount
+        if (balanceOf[this] < amount) throw;               // checks if it has enough to sell
+        balanceOf[msg.sender] += amount;                   // adds the amount to buyer's balance
+        balanceOf[this] -= amount;                         // subtracts amount from seller's balance
+        Transfer(this, msg.sender, amount);                // execute an event reflecting the change
+    }
+
+    function sell(uint256 amount) {
+        if (balanceOf[msg.sender] < amount ) throw;        // checks if the sender has enough to sell
+        balanceOf[this] += amount;                         // adds the amount to owner's balance
+        balanceOf[msg.sender] -= amount;                   // subtracts the amount from seller's balance
+        if (!msg.sender.send(amount * sellPrice)) {        // sends ether to the seller. It's important
+            throw;                                         // to do this last to avoid recursion attacks
+        } else {
+            Transfer(msg.sender, this, amount);            // executes an event reflecting on the change
+        }
+    }
+}
+```
+
+### 部署合约
+滚动到页面下方,你会看到预估的部署花费。你可以左滑设置一个更小的费用,但是如果价格低于市场平均,你的交易可能花费较长时间。点击*DEPLOY*并输入密码。几秒钟以后,你将被重定向到主界面,在**LATEST TRANSACTIONS**部分,你将看到一行写着*creating contract*。等待一些时间,其他节点开始调起你的交易,你可以看到一个缓慢增长的蓝色长方形,代表着有多少其他节点已经看到你的交易并确认了他们。越多的确认出现,也就越加保证了你的代码被部署了。
+![](https://ethereum.org/images/tutorial/created-token.png)
+
+点击写着*admin page*的链接,你就进入了世界上最简单的中央银行的管理界面,在这里,你可以对你新建的合约进行各种操作。
+
+在左边的*READ FROM CONTRACT*栏,你可以免费的使用方法读取合约的值。如果你的合约有其他拥有者,这里会显示他的地址。复制地址然后粘贴在*Balance of*文本框,就会显示出该账号的余额。
+
+在右边的*WRITE TO CONTRACT*栏,你可以看到所有可用的方法。执行这些方法需要消耗gas。如果你的合约可以挖矿,你应该有一个方法叫做*Mint Token*,选择这个方法:
+![](https://ethereum.org/images/tutorial/manage-central-dollar.png)
+
+选择代币接收地址和数量(如果代币的小数点为2,则增加两个0在数量后面)。在**Execute from**选择一个账号作为owner,将*Send ETHER*置零,最后点击*EXECUTE*。
+
+在经过几次确认以后,接收者账户的余额就更新了。但是接收者的钱包可以不会自动展示出来:为了监听自定义代币,钱包必须手动添加合约地址到监听列表。复制你的合约地址(在管理页面,点击*copy address*),然后发送给你的接收者。如果他们还没有监听合约,他们可以到*CONTRACTS*栏, 点击*WATCH TOKEN*,然后将地址填在那里。合约基本属性会自动展示(用户也可以自定义)。主图标是不能改变的,用户发送接收代币的时候要确认是否选择了正确的代币。
+![](https://ethereum.org/images/tutorial/add-token.png)
